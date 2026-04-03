@@ -1,0 +1,126 @@
+**Threat Model:**
+- **Attack Assumption:**
+  - Linux system with a FUSE filesystem mounted (protocol ≥ 7.1, supporting `FUSE_SETXATTR`).
+  - The FUSE daemon is treated as part of the trusted storage/security boundary (e.g., a multi-tenant object store, backup system, or container runtime using xattrs for policy/labels).
+  - Some xattrs (e.g., `security.*` or `user.policy.*`) are intended to be:
+    - Created only once by a privileged component with `XATTR_CREATE`, and
+    - Non-overwritable afterward by unprivileged users (relying on correct handling of `XATTR_CREATE`/`XATTR_REPLACE` semantics).
+  - The FUSE daemon **incorrectly implements** `fuse_setxattr_in.flags`, e.g.:
+    - Ignores `XATTR_CREATE` and `XATTR_REPLACE` and always overwrites or creates the attribute, or
+    - Treats an error path as success.
+  - Kernel and higher-level components assume that standard `setxattr(2)` semantics are enforced by the FUSE filesystem.
+
+- **Attacker Capability:**
+  - Unprivileged local user having:
+    - Write access to some files/objects inside the FUSE mount (e.g., their own objects).
+    - Ability to call `setxattr(2)/lsetxattr(2)/fsetxattr(2)` with arbitrary `flags` (including `XATTR_CREATE`/`XATTR_REPLACE`) and arbitrary attribute names/values on those files.
+  - Attacker does **not** control the FUSE daemon, kernel, or LSM, but can repeatedly trigger FUSE_SETXATTR operations with chosen parameters.
+  - Attacker cannot directly modify backing storage except through the FUSE daemon.
+
+---
+
+**Attack Procedure:**
+
+1. **Initial setup by trusted code:**
+   - A privileged management component (or admin) creates a security label on an object inside the FUSE filesystem:
+     ```c
+     setxattr("/mnt/fuse/obj123",
+              "security.policy_label",
+              "trusted_label",
+              strlen("trusted_label"),
+              XATTR_CREATE);
+     ```
+   - Kernel FUSE client sends `FUSE_SETXATTR` with `flags = XATTR_CREATE`.
+   - FUSE daemon stores `security.policy_label = "trusted_label"` in its backing store.
+   - From this point, the *intended* policy is: this label is immutable for the unprivileged user; attempts to use `XATTR_CREATE` when attribute exists should fail with `-EEXIST`.
+
+2. **Buggy FUSE implementation:**
+   - The FUSE daemon, when handling `FUSE_SETXATTR`, does something like:
+     ```c
+     // BUG: ignores 'flags'
+     int my_setxattr(ino, name, value, size, uint32_t flags) {
+         backend_setxattr(ino, name, value, size);  // overwrites if exists
+         return 0; // always success
+     }
+     ```
+   - It does **not** return `-EEXIST` when `flags & XATTR_CREATE` and the attribute already exists.
+
+3. **Attacker overwrites the security label:**
+   - As an unprivileged user (with normal write access to the object), attacker runs:
+     ```c
+     setxattr("/mnt/fuse/obj123",
+              "security.policy_label",
+              "attacker_label",
+              strlen("attacker_label"),
+              XATTR_CREATE);
+     ```
+   - VFS checks basic permissions but does not know the per-FS semantics; it passes `flags = XATTR_CREATE` to FUSE.
+
+4. **FUSE protocol exchange:**
+   - Kernel constructs:
+     - `fuse_in_header` (opcode `FUSE_SETXATTR=21`)
+     - `fuse_setxattr_in { size = ..., flags = XATTR_CREATE, ... }`
+     - Payload: `"security.policy_label"` and `"attacker_label"`.
+   - Sends this to `/dev/fuse`.
+
+5. **Daemon mishandles flags and overwrites label:**
+   - Daemon reads `flags = XATTR_CREATE` but ignores it, unconditionally overwriting `security.policy_label` in backing store with `"attacker_label"`.
+   - Replies with `fuse_out_header.error = 0` (success), violating the VFS contract (it should have returned `-EEXIST`).
+
+6. **Security impact:**
+   - Any component relying on that xattr (e.g., another service, integrity checker, or policy engine that reads `security.policy_label`) now sees `"attacker_label"`.
+   - This can:
+     - Downgrade classification or enforcement level (e.g., mark sensitive data as non-sensitive).
+     - Trick authorization logic that uses the attribute as a trust token or capability.
+   - Because the kernel and higher-level components trust `setxattr(2)` semantics and assume `XATTR_CREATE` doesn’t overwrite existing attributes, a cross-boundary contract is broken:
+     - Untrusted attacker-controlled flags (`XATTR_CREATE`) plus daemon misimplementation lead to corruption of security-relevant state.
+
+---
+
+**Attack Message:**
+```json
+{
+  "request": {
+    "direction": "kernel_to_daemon",
+    "opcode": "FUSE_SETXATTR",
+    "opcode_number": 21,
+    "in_header": {
+      "len": 112,
+      "opcode": 21,
+      "unique": 0x1001,
+      "nodeid": 0x2002,
+      "uid": 1000,
+      "gid": 1000,
+      "pid": 12345
+    },
+    "fuse_setxattr_in": {
+      "size": 14,
+      "flags": "XATTR_CREATE",        // 0x00000001
+      "setxattr_flags": 0,
+      "padding": 0
+    },
+    "payload": {
+      "name": "security.policy_label",
+      "value": "attacker_label"
+    }
+  },
+  "expected_semantics": {
+    "existing_attr": true,
+    "required_behavior": "FAIL",
+    "expected_errno": "-EEXIST"
+  },
+  "actual_daemon_behavior": {
+    "action": "overwrite_attribute",
+    "stored_value": "attacker_label",
+    "fuse_out_header": {
+      "len": 16,
+      "error": 0,                      // success
+      "unique": 0x1001
+    },
+    "violation": "XATTR_CREATE semantics ignored; existing security label overwritten"
+  },
+  "security_relevance": "Corrupts security-critical xattr used for policy/labels, enabling unprivileged label tampering and potential policy bypass."
+}
+```
+
+**Classification:** ATTACK
