@@ -106,3 +106,7 @@ if((flags & XATTR_REPLACE) && !name_exists){
 ```
 
 This moves the flag check to operate on the per-name level within the deserialized map, correctly implementing POSIX `setxattr(2)` semantics.
+
+---
+
+**Full PoC and scripts**: [GitHub Repository](https://github.com/APEvul-cyber/FUSE_s3fs-fuse_vul/tree/main/SETXATTR_flags_response)

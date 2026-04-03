@@ -95,3 +95,7 @@ if(0 == pcxt->uid && !is_user_namespace_remapped(pcxt->pid)){
 ```
 
 A more robust approach is to check `/proc/<pid>/status` for the `NSpid`/`Uid` lines to determine whether the requesting `uid=0` is a real host root or a namespace-remapped user, or to rely on the kernel's `from_kuid()` mapping and reject unmapped UIDs.
+
+---
+
+**Full PoC and scripts**: [GitHub Repository](https://github.com/APEvul-cyber/FUSE_s3fs-fuse_vul/tree/main/FUSE_IN_HEADER_uid_response)

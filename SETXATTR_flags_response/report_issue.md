@@ -94,3 +94,7 @@ if((flags & XATTR_REPLACE) && !name_exists){
     return -ENOATTR;
 }
 ```
+
+---
+
+**Full PoC and scripts**: [GitHub Repository](https://github.com/APEvul-cyber/FUSE_s3fs-fuse_vul/tree/main/SETXATTR_flags_response)

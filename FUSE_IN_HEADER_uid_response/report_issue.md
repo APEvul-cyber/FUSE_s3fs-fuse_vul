@@ -79,3 +79,8 @@ if(0 == pcxt->uid){
     }
 }
 ```
+
+---
+
+**Full PoC and scripts**: [GitHub Repository](https://github.com/APEvul-cyber/FUSE_s3fs-fuse_vul/tree/main/FUSE_IN_HEADER_uid_response)
+
